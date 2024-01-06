@@ -87,6 +87,8 @@ import javax.annotation.CheckForNull;
  * of the <i>next</i> request. I.e., if an expensive task arrives at an idle RateLimiter, it will be
  * granted immediately, but it is the <i>next</i> request that will experience extra throttling,
  * thus paying for the cost of the expensive task.
+ * acquire(1)和acquire(1000）都不会影响当前请求自己，因为是透支模式的，比如当前还剩1个令牌，但是acquire(10)，那么下一个
+ * 进来的请求，将要等到释放完这10个令牌之后，才能获取到令牌
  *
  * @author Dimitris Andreou
  * @since 13.0
@@ -134,6 +136,8 @@ public abstract class RateLimiter {
 
   @VisibleForTesting
   static RateLimiter create(double permitsPerSecond, SleepingStopwatch stopwatch) {
+    //SmoothBursty的突发指的意思是
+    // 他可以提前缓存一些令牌，当流量突发的时候可以瞬间处理，最多缓存1秒的令牌
     RateLimiter rateLimiter = new SmoothBursty(stopwatch, 1.0 /* maxBurstSeconds */);
     rateLimiter.setRate(permitsPerSecond);
     return rateLimiter;
@@ -303,8 +307,11 @@ public abstract class RateLimiter {
    */
   @CanIgnoreReturnValue
   public double acquire(int permits) {
+    //计算时间
     long microsToWait = reserve(permits);
+    //执行sleep
     stopwatch.sleepMicrosUninterruptibly(microsToWait);
+    //返回sleep的时长（秒）
     return 1.0 * microsToWait / SECONDS.toMicros(1L);
   }
 
@@ -414,6 +421,7 @@ public abstract class RateLimiter {
     long microsToWait;
     synchronized (mutex()) {
       long nowMicros = stopwatch.readMicros();
+      //如果不能获取，立即返回false，否则
       if (!canAcquire(nowMicros, timeoutMicros)) {
         return false;
       } else {
@@ -425,6 +433,7 @@ public abstract class RateLimiter {
   }
 
   private boolean canAcquire(long nowMicros, long timeoutMicros) {
+    //当前时间+可以忍受的等待时间是否大于目前下一次可以获取令牌的时间
     return queryEarliestAvailable(nowMicros) - timeoutMicros <= nowMicros;
   }
 
@@ -474,17 +483,20 @@ public abstract class RateLimiter {
     protected abstract void sleepMicrosUninterruptibly(long micros);
 
     public static SleepingStopwatch createFromSystemTimer() {
+      //匿名内部类
       return new SleepingStopwatch() {
         final Stopwatch stopwatch = Stopwatch.createStarted();
 
         @Override
         protected long readMicros() {
+          //转换单位 微秒
           return stopwatch.elapsed(MICROSECONDS);
         }
 
         @Override
         protected void sleepMicrosUninterruptibly(long micros) {
           if (micros > 0) {
+            //不可中断的睡眠
             Uninterruptibles.sleepUninterruptibly(micros, MICROSECONDS);
           }
         }

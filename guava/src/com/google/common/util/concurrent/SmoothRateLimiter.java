@@ -226,9 +226,12 @@ abstract class SmoothRateLimiter extends RateLimiter {
     void doSetRate(double permitsPerSecond, double stableIntervalMicros) {
       double oldMaxPermits = maxPermits;
       double coldIntervalMicros = stableIntervalMicros * coldFactor;
+      //warmupPeriodMicros为梯形面积，warmupPeriodMicros=2*s*t，所以
       thresholdPermits = 0.5 * warmupPeriodMicros / stableIntervalMicros;
+      //这里是因为梯形面积是warmupPeriod = 0.5 * (stableInterval + coldInterval) * (maxPermits - thresholdPermits)
       maxPermits =
           thresholdPermits + 2.0 * warmupPeriodMicros / (stableIntervalMicros + coldIntervalMicros);
+      //对边比临边
       slope = (coldIntervalMicros - stableIntervalMicros) / (maxPermits - thresholdPermits);
       if (oldMaxPermits == Double.POSITIVE_INFINITY) {
         // if we don't special-case this, we would get storedPermits == NaN, below
@@ -246,21 +249,26 @@ abstract class SmoothRateLimiter extends RateLimiter {
       double availablePermitsAboveThreshold = storedPermits - thresholdPermits;
       long micros = 0;
       // measuring the integral on the right part of the function (the climbing line)
+      //如果梯形里面有令牌
       if (availablePermitsAboveThreshold > 0.0) {
+        //梯形里面能取的令牌，也就是高
         double permitsAboveThresholdToTake = min(availablePermitsAboveThreshold, permitsToTake);
         // TODO(cpovirk): Figure out a good name for this variable.
+        // 理论上应该是上底+下底
         double length =
             permitsToTime(availablePermitsAboveThreshold)
                 + permitsToTime(availablePermitsAboveThreshold - permitsAboveThresholdToTake);
         micros = (long) (permitsAboveThresholdToTake * length / 2.0);
         permitsToTake -= permitsAboveThresholdToTake;
       }
+      //permitsToTake是剩余的要取的令牌，所以这是长方形部分
       // measuring the integral on the left part of the function (the horizontal line)
       micros += (long) (stableIntervalMicros * permitsToTake);
       return micros;
     }
 
     private double permitsToTime(double permits) {
+      //s高+临边*斜率（对边）
       return stableIntervalMicros + permits * slope;
     }
 
@@ -288,7 +296,9 @@ abstract class SmoothRateLimiter extends RateLimiter {
     @Override
     void doSetRate(double permitsPerSecond, double stableIntervalMicros) {
       double oldMaxPermits = this.maxPermits;
+      //最大数量，maxPermits 为 1 秒产生的 permits
       maxPermits = maxBurstSeconds * permitsPerSecond;
+      //oldMaxPermits什么情况才能是无穷大？
       if (oldMaxPermits == Double.POSITIVE_INFINITY) {
         // if we don't special-case this, we would get storedPermits == NaN, below
         storedPermits = maxPermits;
@@ -296,6 +306,7 @@ abstract class SmoothRateLimiter extends RateLimiter {
         storedPermits =
             (oldMaxPermits == 0.0)
                 ? 0.0 // initial state
+                    //假如本来有10个，本来最大是100，现在每秒速率调整成50，那么就应该剩10/100*50
                 : storedPermits * maxPermits / oldMaxPermits;
       }
     }
@@ -320,12 +331,14 @@ abstract class SmoothRateLimiter extends RateLimiter {
   /**
    * The interval between two unit requests, at our stable rate. E.g., a stable rate of 5 permits
    * per second has a stable interval of 200ms.
+   * 每间隔多少时间产生一个permit
    */
   double stableIntervalMicros;
 
   /**
    * The time when the next request (no matter its size) will be granted. After granting a request,
    * this is pushed further in the future. Large requests push this further than small requests.
+   * 下一次可以获取permits的时间
    */
   private long nextFreeTicketMicros = 0L; // could be either in the past or future
 
@@ -335,9 +348,12 @@ abstract class SmoothRateLimiter extends RateLimiter {
 
   @Override
   final void doSetRate(double permitsPerSecond, long nowMicros) {
+    //同步更新库存和时间
     resync(nowMicros);
     double stableIntervalMicros = SECONDS.toMicros(1L) / permitsPerSecond;
+    //间隔在这里才赋值
     this.stableIntervalMicros = stableIntervalMicros;
+    //设置速率，也可能是新速率
     doSetRate(permitsPerSecond, stableIntervalMicros);
   }
 
@@ -355,15 +371,21 @@ abstract class SmoothRateLimiter extends RateLimiter {
 
   @Override
   final long reserveEarliestAvailable(int requiredPermits, long nowMicros) {
+    //更新库存令牌和休眠时间
     resync(nowMicros);
+    //休眠时间就是返回结果
     long returnValue = nextFreeTicketMicros;
+    //返回可以返回的令牌
     double storedPermitsToSpend = min(requiredPermits, this.storedPermits);
+    //不够的令牌
     double freshPermits = requiredPermits - storedPermitsToSpend;
+    //根据不够的令牌计算需要等待多久
     long waitMicros =
-        storedPermitsToWaitTime(this.storedPermits, storedPermitsToSpend)
+        storedPermitsToWaitTime(this.storedPermits, storedPermitsToSpend)//SmoothBursty固定是0
             + (long) (freshPermits * stableIntervalMicros);
-
+    //追加等待时间
     this.nextFreeTicketMicros = LongMath.saturatedAdd(nextFreeTicketMicros, waitMicros);
+    //减少库存
     this.storedPermits -= storedPermitsToSpend;
     return returnValue;
   }
@@ -379,6 +401,7 @@ abstract class SmoothRateLimiter extends RateLimiter {
 
   /**
    * Returns the number of microseconds during cool down that we have to wait to get a new permit.
+   * 对于SmoothBursty是固定的间隔
    */
   abstract double coolDownIntervalMicros();
 
@@ -386,6 +409,8 @@ abstract class SmoothRateLimiter extends RateLimiter {
   void resync(long nowMicros) {
     // if nextFreeTicket is in the past, resync to now
     if (nowMicros > nextFreeTicketMicros) {
+      //浮点数可以做除数
+      //那这个Infinity（无限大）有啥意义呢？
       double newPermits = (nowMicros - nextFreeTicketMicros) / coolDownIntervalMicros();
       storedPermits = min(maxPermits, storedPermits + newPermits);
       nextFreeTicketMicros = nowMicros;

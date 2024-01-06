@@ -100,6 +100,7 @@ import java.util.concurrent.TimeUnit;
 public final class Stopwatch {
   private final Ticker ticker;
   private boolean isRunning;
+  //经过的时间 elapsedNanos += tick - startTick;
   private long elapsedNanos;
   private long startTick;
 
@@ -215,6 +216,7 @@ public final class Stopwatch {
    * @since 14.0 (since 10.0 as {@code elapsedTime()})
    */
   public long elapsed(TimeUnit desiredUnit) {
+    //转换时间
     return desiredUnit.convert(elapsedNanos(), NANOSECONDS);
   }
 
